@@ -88,33 +88,29 @@ if uploaded_file:
     learner_to_txns = defaultdict(list)
 
     for _, row in df.iterrows():
-        desc = str(row["Description"]).upper()
-        txn_id = str(row["Transaction ID"])
 
-        handles = extract_handles(desc)
+        txn_id = str(row["Transaction ID"])
+        desc = str(row["Description"]).upper()
+
         tokens = tokenize(desc)
 
-        # Remove handles from tokens so they don’t split
-        for h in handles:
-            desc = desc.replace(h, "")
+        for i, token in enumerate(tokens):
 
-        payer_tokens = []
-        learner_ids = []
+            # Detect handle
+            if "@" in token:
 
-        # Handles are learners
-        for h in handles:
-            base_learner = normalize_learner(h)
-            learner_ids.append(base_learner)
+                base_learner = token.split("@")[0]
+                base_learner = base_learner.split("-")[0]
 
-        for token in tokens:
-            if is_valid_learner(token):
-                payer_tokens.append(token)
+                # Payer = token before handle
+                payer_name = "UNKNOWN"
 
-        payer_signature = "|".join(sorted(set(payer_tokens)))
+                if i > 0:
+                    payer_name = tokens[i - 1].strip()
 
-        for learner in learner_ids:
-            learner_to_payers[learner].add(payer_signature)
-            learner_to_txns[learner].append(txn_id)
+                learner_to_payers[base_learner].add(payer_name)
+                learner_to_txns[base_learner].append(txn_id)
+
 
     suspicious = []
 
