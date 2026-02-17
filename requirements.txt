@@ -1,6 +1,9 @@
 # Dev environment
 pip
 autopep8
-
+streamlit
+pandas
+openpyxl
+xlrd
 # App
 flask
