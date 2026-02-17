@@ -3,21 +3,22 @@ import pandas as pd
 import re
 from collections import defaultdict
 
-st.set_page_config(page_title="Institution Payment Detector", layout="wide")
-st.title("🚨 Institutional Payment Malpractice Detector")
-st.write("Detects if same payer paid for multiple learners.")
+st.set_page_config(page_title="Multi-Learner Payment Detector", layout="wide")
+st.title("🚨 Multi-Learner Account Payment Detector")
+
+st.write("Detects if the same UPI account paid for more than one learner.")
 
 uploaded_file = st.file_uploader(
     "Upload Excel or CSV file (First row must be headers)",
     type=["xlsx", "xls", "csv"]
 )
 
-# ---------------------------------------------------
+# ----------------------------------------------------
 # FUNCTIONS
-# ---------------------------------------------------
+# ----------------------------------------------------
 
 def extract_handles(text):
-    return re.findall(r'[A-Z0-9._-]+@[A-Z0-9]+', text)
+    return re.findall(r'[A-Z0-9._-]+@[A-Z0-9]+', text.upper())
 
 def normalize_learner(handle):
     handle = handle.upper()
@@ -25,14 +26,9 @@ def normalize_learner(handle):
     handle = handle.split("-")[0]
     return handle.strip()
 
-def tokenize(text):
-    text = str(text).upper()
-    text = text.replace("-", "-")  # keep dash
-    return [t.strip() for t in text.split("/") if t.strip()]
-
-# ---------------------------------------------------
+# ----------------------------------------------------
 # MAIN
-# ---------------------------------------------------
+# ----------------------------------------------------
 
 if uploaded_file:
 
@@ -48,11 +44,11 @@ if uploaded_file:
             st.error("File must contain 'Description' and 'Transaction ID' columns.")
             st.stop()
 
-        payer_to_learners = defaultdict(set)
-        payer_to_txns = defaultdict(list)
+        handle_to_learners = defaultdict(set)
+        handle_to_txns = defaultdict(list)
 
         # -------------------------------------------
-        # PROCESS ROWS
+        # PROCESS EACH TRANSACTION
         # -------------------------------------------
         for _, row in df.iterrows():
 
@@ -64,37 +60,27 @@ if uploaded_file:
             if not handles:
                 continue
 
-            tokens = tokenize(desc)
-
             for handle in handles:
-
                 learner = normalize_learner(handle)
 
-                # find payer by locating handle in token list
-                for i, token in enumerate(tokens):
-                    if handle in token:
-                        if i > 0:
-                            payer = tokens[i - 1]
-                        else:
-                            payer = "UNKNOWN"
-
-                        payer_to_learners[payer].add(learner)
-                        payer_to_txns[payer].append(txn_id)
+                handle_to_learners[handle].add(learner)
+                handle_to_txns[handle].append(txn_id)
 
         # -------------------------------------------
-        # DETECT INSTITUTIONAL PAYERS
+        # DETECT HANDLES PAYING MULTIPLE LEARNERS
         # -------------------------------------------
         suspicious = []
 
-        for payer, learners in payer_to_learners.items():
+        for handle, learners in handle_to_learners.items():
             if len(learners) > 1:
                 suspicious.append({
-                    "PAYER_NAME": payer,
+                    "UPI_HANDLE": handle,
                     "DISTINCT_LEARNER_COUNT": len(learners),
-                    "FLAG": "🚨 INSTITUTIONAL PAYMENT"
+                    "LEARNERS": ", ".join(sorted(learners)),
+                    "FLAG": "🚨 PAID FOR MULTIPLE LEARNERS"
                 })
 
-        st.header("🔎 Suspicious Institutional Payers")
+        st.header("🔎 Suspicious UPI Accounts")
 
         if suspicious:
             suspicious_df = pd.DataFrame(suspicious).sort_values(
@@ -105,19 +91,19 @@ if uploaded_file:
             st.dataframe(suspicious_df, use_container_width=True)
 
             st.download_button(
-                "Download Suspicious Payers",
+                "Download Suspicious Accounts",
                 suspicious_df.to_csv(index=False),
-                "suspicious_payers.csv",
+                "suspicious_accounts.csv",
                 "text/csv"
             )
 
             # Evidence
             evidence_rows = []
 
-            for payer in suspicious_df["PAYER_NAME"]:
-                for txn in payer_to_txns[payer]:
+            for handle in suspicious_df["UPI_HANDLE"]:
+                for txn in handle_to_txns[handle]:
                     evidence_rows.append({
-                        "PAYER_NAME": payer,
+                        "UPI_HANDLE": handle,
                         "TRANSACTION_ID": txn
                     })
 
@@ -134,7 +120,7 @@ if uploaded_file:
             )
 
         else:
-            st.success("✅ No institutional malpractice detected.")
+            st.success("✅ No accounts paid for multiple learners.")
 
     except Exception as e:
         st.error(f"Error: {e}")
