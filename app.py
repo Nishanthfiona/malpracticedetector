@@ -16,42 +16,68 @@ uploaded_file = st.file_uploader("Upload Excel or CSV file (First row must be he
 
 def normalize(text):
     text = str(text).upper()
-    text = re.sub(r'[-_]', '/', text)
+    text = re.sub(r'\|', '/', text)   # only replace pipe
     text = re.sub(r'//+', '/', text)
     return text.strip()
 
-def extract_upi_parts(description):
-    description = normalize(description)
-    tokens = description.split('/')
 
-    mode = tokens[0] if len(tokens) > 0 else None
+def extract_parts(description):
+
+    description = normalize(description)
+    tokens = [t.strip() for t in description.split('/') if t.strip()]
+
+    mode = tokens[0] if tokens else None
 
     learner_handle = None
+    learner_id = None
     payer_name = None
     payer_handle = None
 
-    # detect handles
-    handles = [t for t in tokens if '@' in t]
+    # -----------------------
+    # UPI PARSING
+    # -----------------------
+    if mode == "UPI":
 
-    if handles:
-        learner_handle = handles[0]
-        payer_handle = handles[1] if len(handles) > 1 else None
+        # find all handles
+        handles = [t for t in tokens if '@' in t]
 
-    # learner id from handle
-    learner_id = None
-    if learner_handle:
-        learner_id = learner_handle.split('@')[0]
+        if handles:
+            learner_handle = handles[0]
+            learner_id = learner_handle.split('@')[0]
 
-    # payer name = first TEXT token before learner handle
-    for t in tokens:
-        if learner_handle and t == learner_handle:
-            break
-        if not any(x in t for x in ['BANK', 'UPI', 'PAY', 'TRANSFER']) and '@' not in t:
-            if not re.search(r'\d{8,}', t):
+        # payer name = first text before learner handle
+        for t in tokens:
+            if learner_handle and t == learner_handle:
+                break
+
+            if '@' not in t and not t.isdigit() and "BANK" not in t and t != "UPI":
+                payer_name = t
+                break
+
+    # -----------------------
+    # IMPS / MMT PARSING
+    # -----------------------
+    elif mode in ["MMT", "IMPS"]:
+
+        # payer name is token before BANK
+        for i in range(len(tokens)-1, -1, -1):
+            if "BANK" in tokens[i]:
+                if i-1 >= 0:
+                    payer_name = tokens[i-1]
+                break
+
+    # -----------------------
+    # NEFT parsing (basic)
+    # -----------------------
+    elif mode == "NEFT":
+
+        for t in tokens:
+            if "MR" in t or re.search(r'[A-Z]{3,}\s+[A-Z]{3,}', t):
                 payer_name = t
                 break
 
     return mode, learner_handle, learner_id, payer_name, payer_handle
+
 
 # -----------------------------------
 # MAIN LOGIC
