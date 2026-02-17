@@ -95,32 +95,28 @@ if uploaded_file:
     try:
         # Load file
         if uploaded_file.name.endswith(".csv"):
-            sheets = {"CSV": pd.read_csv(uploaded_file)}
+            raw_df = pd.read_csv(uploaded_file, header=None)
         else:
-            sheets = pd.read_excel(uploaded_file, sheet_name=None)
+            raw_df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None)
 
-        selected_sheet = st.selectbox("Select Sheet", list(sheets.keys()))
-        df = sheets[selected_sheet]
+        # --- Auto Detect Header Row ---
+        header_row = None
 
-        st.write("Preview of Data:")
-        st.dataframe(df.head())
+        for i in range(len(raw_df)):
+            row_values = raw_df.iloc[i].astype(str).str.upper().tolist()
+            if "TRANSACTION ID" in row_values and "DESCRIPTION" in row_values:
+                header_row = i
+                break
 
-        # Auto detect
-        desc_col, txn_col = auto_detect_columns(df)
+        if header_row is None:
+            st.error("❌ Could not automatically detect header row.")
+            st.stop()
 
-        # Manual override if needed
-        if not desc_col:
-            desc_col = st.selectbox("Select Description Column", df.columns)
-
-        if not txn_col:
-            txn_col = st.selectbox("Select Transaction ID Column", df.columns)
-
-        if st.button("Run Detection"):
-
-            data = df[[txn_col, desc_col]].dropna()
-            data.columns = ["TRANSACTION_ID", "DESCRIPTION"]
-
-            st.success(f"Loaded {len(data)} transactions.")
+        # Reload with correct header
+        if uploaded_file.name.endswith(".csv"):
+            df = pd.read_csv(uploaded_file, header=header_row)
+        else:
+            df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_row)
 
             # -----------------------------
             # PASS 1: Find Valid Learners
