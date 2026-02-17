@@ -64,6 +64,12 @@ def is_valid_learner(token):
 # ------------------------------
 # MAIN
 # ------------------------------
+def normalize_learner(handle):
+    handle = handle.upper()
+    handle = handle.split("@")[0]   # remove bank part
+    handle = handle.split("-")[0]   # remove -2 suffix
+    return handle
+
 
 if uploaded_file:
 
@@ -97,7 +103,8 @@ if uploaded_file:
 
         # Handles are learners
         for h in handles:
-            learner_ids.append(h)
+            base_learner = normalize_learner(h)
+            learner_ids.append(base_learner)
 
         for token in tokens:
             if is_valid_learner(token):
