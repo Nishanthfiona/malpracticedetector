@@ -150,7 +150,6 @@ if uploaded_file:
             # -----------------------------
             # PASS 2: Map Learner → Payers
             # -----------------------------
-
             learner_to_payers = defaultdict(set)
             learner_to_txns = defaultdict(list)
             evidence_rows = []
@@ -160,32 +159,30 @@ if uploaded_file:
                 tokens = tokenize(row["DESCRIPTION"])
                 classified = [(t, classify(t)) for t in tokens]
 
-                learners_in_txn = []
+                for i, (token, typ) in enumerate(classified):
 
-                for token, typ in classified:
                     if typ in ["HANDLE", "ID_LIKE"]:
                         cleaned = clean_token(token)
+
                         if cleaned in valid_learners:
-                            learners_in_txn.append(cleaned)
 
-                payer_tokens = [
-                    token for token, typ in classified
-                    if typ == "TEXT"
-                    and not any(bank in token for bank in bank_keywords)
-                    and not any(sys in token for sys in system_keywords)
-                ]
+                            # Find payer token before learner
+                            payer_name = "UNKNOWN"
 
-                payer_signature = "|".join(sorted(set(payer_tokens)))
+                            if i > 0:
+                                prev_token, prev_type = classified[i - 1]
 
-                for learner in learners_in_txn:
-                    learner_to_payers[learner].add(payer_signature)
-                    learner_to_txns[learner].append(txn_id)
+                                if prev_type == "TEXT":
+                                    payer_name = prev_token.strip()
 
-                    evidence_rows.append({
-                        "LEARNER_ID": learner,
-                        "TRANSACTION_ID": txn_id,
-                        "PAYER_SIGNATURE": payer_signature
-                    })
+                            learner_to_payers[cleaned].add(payer_name)
+                            learner_to_txns[cleaned].append(txn_id)
+
+                            evidence_rows.append({
+                                "LEARNER_ID": cleaned,
+                                "TRANSACTION_ID": txn_id,
+                                "PAYER_NAME": payer_name
+                            })
 
             # -----------------------------
             # Detect Malpractice
