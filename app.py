@@ -116,7 +116,7 @@ if uploaded_file:
         if uploaded_file.name.endswith(".csv"):
             df = pd.read_csv(uploaded_file, header=header_row)
         else:
-            df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_row)
+            df = pd.read_excel(uploaded_file, sheet_name="OpTransactionHistoryUX3", header=header_row)
 
             # -----------------------------
             # PASS 1: Find Valid Learners
