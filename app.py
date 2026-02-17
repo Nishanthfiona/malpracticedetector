@@ -1,71 +1,39 @@
 import streamlit as st
 import pandas as pd
 import re
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 st.set_page_config(page_title="Transaction Malpractice Detector", layout="wide")
 
 st.title("🚨 Transaction Malpractice Detector")
+st.write("Upload bank statement file (Excel or CSV). System will automatically detect suspicious learner IDs.")
 
 uploaded_file = st.file_uploader(
     "Upload Excel or CSV file",
     type=["xlsx", "xls", "csv"]
 )
 
-# --------------------------------------------------
-# CONFIGURATION
-# --------------------------------------------------
+# ----------------------------------
+# KEYWORD SETTINGS
+# ----------------------------------
 
 bank_keywords = [
-    "BANK", "LTD", "FINANCE", "CO-OP", "POST", "NBD",
-    "HDFC", "ICICI", "AXIS", "SBI", "STATE", "UNION",
-    "KOTAK", "PUNJAB", "INDIAN", "OVERSEAS", "BARODA",
-    "KARNATAKA", "CANARA", "IDFC"
+    "BANK", "LTD", "FINANCE", "COOP", "POST",
+    "HDFC", "ICICI", "AXIS", "SBI", "STATE",
+    "UNION", "KOTAK", "PUNJAB", "INDIAN",
+    "OVERSEAS", "BARODA", "KARNATAKA"
 ]
 
 system_keywords = [
     "PAYMENT", "PAY", "FEES", "COURSE", "NEBOSH",
     "USING", "FROM", "TO", "BALANCE", "ATTN",
     "INB", "GIF", "TRANSFER", "CREDIT",
-    "REGISTRATION", "EXAM"
+    "UPI", "IMPS", "NEFT"
 ]
 
-# --------------------------------------------------
-# HELPERS
-# --------------------------------------------------
-
-def find_header_row(df):
-    """
-    Scans first 15 rows to detect actual header row.
-    Looks for both Transaction and Description words.
-    """
-    for i in range(min(15, len(df))):
-        row = df.iloc[i].astype(str).str.upper()
-        if (
-            any("TRANSACTION" in val for val in row)
-            and any("DESC" in val for val in row)
-        ):
-            return i
-    return None
-
-
-def detect_columns(df):
-    desc_col = None
-    txn_col = None
-
-    for col in df.columns:
-        col_lower = str(col).lower()
-        if not desc_col and "desc" in col_lower:
-            desc_col = col
-        if not txn_col and (
-            "transaction" in col_lower
-            or "txn" in col_lower
-            or "ref" in col_lower
-        ):
-            txn_col = col
-
-    return desc_col, txn_col
-
+# ----------------------------------
+# HELPER FUNCTIONS
+# ----------------------------------
 
 def normalize_description(desc):
     desc = str(desc).upper()
@@ -82,113 +50,141 @@ def tokenize(desc):
 
 def classify(token):
     if '@' in token:
-        return 'HANDLE'
-    if len(token) > 25:
-        return 'HASH'
+        return "HANDLE"
     if token.isdigit() and len(token) >= 10:
-        return 'PHONE'
+        return "PHONE"
+    if len(token) > 25:
+        return "HASH"
     if any(bank in token for bank in bank_keywords):
-        return 'BANK'
+        return "BANK"
     if any(sys in token for sys in system_keywords):
-        return 'SYSTEM'
+        return "SYSTEM"
     if re.search(r'[A-Z]', token) and re.search(r'\d', token):
-        return 'ID_LIKE'
-    return 'TEXT'
+        return "ID_LIKE"
+    return "TEXT"
 
 
-# --------------------------------------------------
+def detect_columns(df):
+    desc_col = None
+    txn_col = None
+
+    for col in df.columns:
+        col_lower = col.lower()
+        if not desc_col and "desc" in col_lower:
+            desc_col = col
+        if not txn_col and ("transaction" in col_lower or "txn" in col_lower):
+            txn_col = col
+
+    return desc_col, txn_col
+
+
+def clean_token(token):
+    token = re.sub(r'@.*', '', token)
+    token = re.sub(r'[^A-Z0-9]', '', token)
+    return token
+
+
+# ----------------------------------
 # MAIN PROCESS
-# --------------------------------------------------
+# ----------------------------------
 
 if uploaded_file:
 
     try:
+        # Load file
+        if uploaded_file.name.endswith(".csv"):
+            sheets = {"CSV": pd.read_csv(uploaded_file)}
+        else:
+            sheets = pd.read_excel(uploaded_file, sheet_name=None)
+
         all_data = []
 
-        # ---------------- CSV ----------------
-        if uploaded_file.name.endswith(".csv"):
+        for sheet_name, df in sheets.items():
+            desc_col, txn_col = detect_columns(df)
 
-            temp_df = pd.read_csv(uploaded_file, header=None)
-            header_row = find_header_row(temp_df)
-
-            if header_row is None:
-                st.error("❌ Could not detect transaction table header.")
-                st.stop()
-
-            df = pd.read_csv(uploaded_file, header=header_row)
-            all_data.append(df)
-
-        # ---------------- EXCEL ----------------
-        else:
-            raw_sheets = pd.read_excel(uploaded_file, sheet_name=None, header=None)
-
-            for sheet_name, temp_df in raw_sheets.items():
-                header_row = find_header_row(temp_df)
-
-                if header_row is not None:
-                    df = pd.read_excel(
-                        uploaded_file,
-                        sheet_name=sheet_name,
-                        header=header_row
-                    )
-                    df["SHEET"] = sheet_name
-                    all_data.append(df)
+            if desc_col and txn_col:
+                df = df[[txn_col, desc_col]].dropna()
+                df.columns = ["TRANSACTION_ID", "DESCRIPTION"]
+                df["SHEET"] = sheet_name
+                all_data.append(df)
 
         if not all_data:
-            st.error("❌ Could not detect transaction table structure.")
+            st.error("❌ Could not detect required columns (Description & Transaction ID).")
             st.stop()
 
-        combined_df = pd.concat(all_data, ignore_index=True)
+        data = pd.concat(all_data, ignore_index=True)
 
-        desc_col, txn_col = detect_columns(combined_df)
+        st.success(f"Loaded {len(data)} transactions.")
 
-        if not desc_col or not txn_col:
-            st.error("❌ Could not detect Description or Transaction ID column.")
-            st.stop()
+        # ----------------------------------
+        # PASS 1: Find Valid Learner IDs
+        # ----------------------------------
 
-        data = combined_df[[txn_col, desc_col]].dropna()
-        data.columns = ["TRANSACTION_ID", "DESCRIPTION"]
+        candidate_tokens = []
 
-        st.success(f"✅ Loaded {len(data)} transactions successfully.")
+        for _, row in data.iterrows():
+            tokens = tokenize(row["DESCRIPTION"])
+            classified = [(t, classify(t)) for t in tokens]
 
-        # --------------------------------------------------
-        # DETECTION LOGIC
-        # --------------------------------------------------
+            for token, typ in classified:
+                if typ in ["HANDLE", "ID_LIKE"]:
+                    cleaned = clean_token(token)
+
+                    if 6 <= len(cleaned) <= 18:
+                        if not any(bank in cleaned for bank in bank_keywords):
+                            candidate_tokens.append(cleaned)
+
+        token_counts = Counter(candidate_tokens)
+
+        # Only tokens appearing at least twice
+        valid_learners = {
+            token for token, count in token_counts.items()
+            if count >= 2
+        }
+
+        # ----------------------------------
+        # PASS 2: Build Learner → Payer Map
+        # ----------------------------------
 
         learner_to_payers = defaultdict(set)
         learner_to_txns = defaultdict(list)
-        detailed_rows = []
+        evidence_rows = []
 
         for _, row in data.iterrows():
-
             txn_id = str(row["TRANSACTION_ID"])
             tokens = tokenize(row["DESCRIPTION"])
             classified = [(t, classify(t)) for t in tokens]
 
-            learner_ids = [
-                t for t, typ in classified
-                if typ in ["HANDLE", "ID_LIKE"]
-                and not any(bank in t for bank in bank_keywords)
-            ]
+            learners_in_txn = []
+
+            for token, typ in classified:
+                if typ in ["HANDLE", "ID_LIKE"]:
+                    cleaned = clean_token(token)
+                    if cleaned in valid_learners:
+                        learners_in_txn.append(cleaned)
 
             payer_tokens = [
-                t for t, typ in classified
+                token for token, typ in classified
                 if typ == "TEXT"
-                and not any(bank in t for bank in bank_keywords)
-                and not any(sys in t for sys in system_keywords)
+                and not any(bank in token for bank in bank_keywords)
+                and not any(sys in token for sys in system_keywords)
             ]
 
             payer_signature = "|".join(sorted(set(payer_tokens)))
 
-            for learner in learner_ids:
+            for learner in learners_in_txn:
                 learner_to_payers[learner].add(payer_signature)
                 learner_to_txns[learner].append(txn_id)
 
-                detailed_rows.append({
+                evidence_rows.append({
                     "LEARNER_ID": learner,
                     "TRANSACTION_ID": txn_id,
                     "PAYER_SIGNATURE": payer_signature
                 })
+
+        # ----------------------------------
+        # Detect Malpractice
+        # ----------------------------------
 
         suspicious = []
 
@@ -197,18 +193,22 @@ if uploaded_file:
                 suspicious.append({
                     "LEARNER_ID": learner,
                     "DISTINCT_PAYER_COUNT": len(payers),
+                    "TOTAL_TRANSACTIONS": len(learner_to_txns[learner]),
                     "FLAG": "🚨 MALPRACTICE"
                 })
 
         st.header("🔎 Suspicious Learners")
 
         if suspicious:
+            suspicious_df = pd.DataFrame(suspicious).sort_values(
+                by="DISTINCT_PAYER_COUNT",
+                ascending=False
+            )
 
-            suspicious_df = pd.DataFrame(suspicious)
-            st.dataframe(suspicious_df)
+            st.dataframe(suspicious_df, use_container_width=True)
 
             st.download_button(
-                "Download Suspicious Learners CSV",
+                "Download Suspicious Learners",
                 suspicious_df.to_csv(index=False),
                 "suspicious_learners.csv",
                 "text/csv"
@@ -216,18 +216,19 @@ if uploaded_file:
 
             st.header("📄 Evidence Details")
 
-            details_df = pd.DataFrame(detailed_rows)
-            evidence = details_df[
-                details_df["LEARNER_ID"].isin(
+            evidence_df = pd.DataFrame(evidence_rows)
+
+            evidence_df = evidence_df[
+                evidence_df["LEARNER_ID"].isin(
                     suspicious_df["LEARNER_ID"]
                 )
             ]
 
-            st.dataframe(evidence)
+            st.dataframe(evidence_df, use_container_width=True)
 
             st.download_button(
-                "Download Evidence CSV",
-                evidence.to_csv(index=False),
+                "Download Evidence",
+                evidence_df.to_csv(index=False),
                 "evidence.csv",
                 "text/csv"
             )
@@ -236,4 +237,4 @@ if uploaded_file:
             st.success("✅ No malpractice detected.")
 
     except Exception as e:
-        st.error(f"⚠️ Error processing file: {e}")
+        st.error(f"Error: {e}")
