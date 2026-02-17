@@ -7,28 +7,65 @@ st.set_page_config(page_title="Transaction Malpractice Detector", layout="wide")
 
 st.title("🚨 Transaction Malpractice Detector")
 
-uploaded_file = st.file_uploader("Upload Excel or CSV file", type=["xlsx", "xls", "csv"])
+uploaded_file = st.file_uploader(
+    "Upload Excel or CSV file",
+    type=["xlsx", "xls", "csv"]
+)
 
-# ------------------------------
-# TOKEN CLASSIFICATION SETTINGS
-# ------------------------------
+# --------------------------------------------------
+# CONFIGURATION
+# --------------------------------------------------
 
 bank_keywords = [
     "BANK", "LTD", "FINANCE", "CO-OP", "POST", "NBD",
     "HDFC", "ICICI", "AXIS", "SBI", "STATE", "UNION",
     "KOTAK", "PUNJAB", "INDIAN", "OVERSEAS", "BARODA",
-    "KARNATAKA"
+    "KARNATAKA", "CANARA", "IDFC"
 ]
 
 system_keywords = [
     "PAYMENT", "PAY", "FEES", "COURSE", "NEBOSH",
     "USING", "FROM", "TO", "BALANCE", "ATTN",
-    "INB", "GIF", "TRANSFER", "CREDIT"
+    "INB", "GIF", "TRANSFER", "CREDIT",
+    "REGISTRATION", "EXAM"
 ]
 
-# ------------------------------
-# HELPER FUNCTIONS
-# ------------------------------
+# --------------------------------------------------
+# HELPERS
+# --------------------------------------------------
+
+def find_header_row(df):
+    """
+    Scans first 15 rows to detect actual header row.
+    Looks for both Transaction and Description words.
+    """
+    for i in range(min(15, len(df))):
+        row = df.iloc[i].astype(str).str.upper()
+        if (
+            any("TRANSACTION" in val for val in row)
+            and any("DESC" in val for val in row)
+        ):
+            return i
+    return None
+
+
+def detect_columns(df):
+    desc_col = None
+    txn_col = None
+
+    for col in df.columns:
+        col_lower = str(col).lower()
+        if not desc_col and "desc" in col_lower:
+            desc_col = col
+        if not txn_col and (
+            "transaction" in col_lower
+            or "txn" in col_lower
+            or "ref" in col_lower
+        ):
+            txn_col = col
+
+    return desc_col, txn_col
+
 
 def normalize_description(desc):
     desc = str(desc).upper()
@@ -59,60 +96,73 @@ def classify(token):
     return 'TEXT'
 
 
-def detect_columns(df):
-    desc_col = None
-    txn_col = None
-
-    for col in df.columns:
-        col_lower = col.lower()
-        if not desc_col and "desc" in col_lower:
-            desc_col = col
-        if not txn_col and ("transaction" in col_lower or "txn" in col_lower):
-            txn_col = col
-
-    return desc_col, txn_col
-
-
-# ------------------------------
-# MAIN LOGIC
-# ------------------------------
+# --------------------------------------------------
+# MAIN PROCESS
+# --------------------------------------------------
 
 if uploaded_file:
 
     try:
-        if uploaded_file.name.endswith(".csv"):
-            sheets = {"CSV": pd.read_csv(uploaded_file)}
-        else:
-            sheets = pd.read_excel(uploaded_file, sheet_name=None)
-
         all_data = []
 
-        for sheet_name, df in sheets.items():
-            desc_col, txn_col = detect_columns(df)
+        # ---------------- CSV ----------------
+        if uploaded_file.name.endswith(".csv"):
 
-            if desc_col and txn_col:
-                df = df[[txn_col, desc_col]].dropna()
-                df.columns = ["TRANSACTION_ID", "DESCRIPTION"]
-                df["SHEET"] = sheet_name
-                all_data.append(df)
+            temp_df = pd.read_csv(uploaded_file, header=None)
+            header_row = find_header_row(temp_df)
+
+            if header_row is None:
+                st.error("❌ Could not detect transaction table header.")
+                st.stop()
+
+            df = pd.read_csv(uploaded_file, header=header_row)
+            all_data.append(df)
+
+        # ---------------- EXCEL ----------------
+        else:
+            raw_sheets = pd.read_excel(uploaded_file, sheet_name=None, header=None)
+
+            for sheet_name, temp_df in raw_sheets.items():
+                header_row = find_header_row(temp_df)
+
+                if header_row is not None:
+                    df = pd.read_excel(
+                        uploaded_file,
+                        sheet_name=sheet_name,
+                        header=header_row
+                    )
+                    df["SHEET"] = sheet_name
+                    all_data.append(df)
 
         if not all_data:
-            st.error("❌ Could not detect required columns (Description & Transaction ID).")
+            st.error("❌ Could not detect transaction table structure.")
             st.stop()
 
-        data = pd.concat(all_data, ignore_index=True)
+        combined_df = pd.concat(all_data, ignore_index=True)
 
-        st.success(f"Loaded {len(data)} transactions.")
+        desc_col, txn_col = detect_columns(combined_df)
+
+        if not desc_col or not txn_col:
+            st.error("❌ Could not detect Description or Transaction ID column.")
+            st.stop()
+
+        data = combined_df[[txn_col, desc_col]].dropna()
+        data.columns = ["TRANSACTION_ID", "DESCRIPTION"]
+
+        st.success(f"✅ Loaded {len(data)} transactions successfully.")
+
+        # --------------------------------------------------
+        # DETECTION LOGIC
+        # --------------------------------------------------
 
         learner_to_payers = defaultdict(set)
         learner_to_txns = defaultdict(list)
-
         detailed_rows = []
 
         for _, row in data.iterrows():
+
             txn_id = str(row["TRANSACTION_ID"])
             tokens = tokenize(row["DESCRIPTION"])
-
             classified = [(t, classify(t)) for t in tokens]
 
             learner_ids = [
@@ -153,6 +203,7 @@ if uploaded_file:
         st.header("🔎 Suspicious Learners")
 
         if suspicious:
+
             suspicious_df = pd.DataFrame(suspicious)
             st.dataframe(suspicious_df)
 
@@ -185,4 +236,4 @@ if uploaded_file:
             st.success("✅ No malpractice detected.")
 
     except Exception as e:
-        st.error(f"Error processing file: {e}")
+        st.error(f"⚠️ Error processing file: {e}")
