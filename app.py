@@ -103,7 +103,7 @@ if uploaded_file:
             desc = row["Description"]
             txn_id = row["Transaction ID"]
 
-            mode, learner_handle, learner_id, payer_name, payer_handle = extract_upi_parts(desc)
+            mode, learner_handle, learner_id, payer_name, payer_handle = extract_parts(desc)
 
             structured_rows.append({
                 "Transaction_ID": txn_id,
