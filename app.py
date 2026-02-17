@@ -5,42 +5,38 @@ from collections import defaultdict
 
 st.set_page_config(page_title="Institution Payment Detector", layout="wide")
 st.title("🚨 Institutional Payment Malpractice Detector")
-
-st.write("Detects if the same payer paid for multiple learners.")
+st.write("Detects if same payer paid for multiple learners.")
 
 uploaded_file = st.file_uploader(
     "Upload Excel or CSV file (First row must be headers)",
     type=["xlsx", "xls", "csv"]
 )
 
-# ----------------------------------------------------
-# REGEX PATTERN FOR UPI STRUCTURE
-# ----------------------------------------------------
-# Matches:
-# /PAYER_NAME/LEARNER_HANDLE/
-# Example:
-# /AJITH/SRUTHYCS200-2@O/
+# ---------------------------------------------------
+# FUNCTIONS
+# ---------------------------------------------------
 
-upi_pattern = re.compile(r'/([^/]+)/([A-Z0-9._-]+@[A-Z0-9]+)/')
-
-# ----------------------------------------------------
-# NORMALIZE LEARNER ID
-# ----------------------------------------------------
+def extract_handles(text):
+    return re.findall(r'[A-Z0-9._-]+@[A-Z0-9]+', text)
 
 def normalize_learner(handle):
     handle = handle.upper()
-    handle = handle.split("@")[0]   # remove bank
-    handle = handle.split("-")[0]   # remove -2 suffix
+    handle = handle.split("@")[0]
+    handle = handle.split("-")[0]
     return handle.strip()
 
-# ----------------------------------------------------
+def tokenize(text):
+    text = str(text).upper()
+    text = text.replace("-", "-")  # keep dash
+    return [t.strip() for t in text.split("/") if t.strip()]
+
+# ---------------------------------------------------
 # MAIN
-# ----------------------------------------------------
+# ---------------------------------------------------
 
 if uploaded_file:
 
     try:
-        # Load file
         if uploaded_file.name.endswith(".csv"):
             df = pd.read_csv(uploaded_file)
         else:
@@ -48,7 +44,6 @@ if uploaded_file:
 
         st.success(f"Loaded {len(df)} rows")
 
-        # Check required columns
         if "Description" not in df.columns or "Transaction ID" not in df.columns:
             st.error("File must contain 'Description' and 'Transaction ID' columns.")
             st.stop()
@@ -56,27 +51,39 @@ if uploaded_file:
         payer_to_learners = defaultdict(set)
         payer_to_txns = defaultdict(list)
 
-        # ------------------------------------------------
-        # PROCESS EACH ROW
-        # ------------------------------------------------
+        # -------------------------------------------
+        # PROCESS ROWS
+        # -------------------------------------------
         for _, row in df.iterrows():
 
             txn_id = str(row["Transaction ID"])
             desc = str(row["Description"]).upper()
 
-            matches = upi_pattern.findall(desc)
+            handles = extract_handles(desc)
 
-            for payer, handle in matches:
+            if not handles:
+                continue
+
+            tokens = tokenize(desc)
+
+            for handle in handles:
 
                 learner = normalize_learner(handle)
-                payer = payer.strip()
 
-                payer_to_learners[payer].add(learner)
-                payer_to_txns[payer].append(txn_id)
+                # find payer by locating handle in token list
+                for i, token in enumerate(tokens):
+                    if handle in token:
+                        if i > 0:
+                            payer = tokens[i - 1]
+                        else:
+                            payer = "UNKNOWN"
 
-        # ------------------------------------------------
+                        payer_to_learners[payer].add(learner)
+                        payer_to_txns[payer].append(txn_id)
+
+        # -------------------------------------------
         # DETECT INSTITUTIONAL PAYERS
-        # ------------------------------------------------
+        # -------------------------------------------
         suspicious = []
 
         for payer, learners in payer_to_learners.items():
@@ -98,15 +105,13 @@ if uploaded_file:
             st.dataframe(suspicious_df, use_container_width=True)
 
             st.download_button(
-                "Download Suspicious Payers CSV",
+                "Download Suspicious Payers",
                 suspicious_df.to_csv(index=False),
                 "suspicious_payers.csv",
                 "text/csv"
             )
 
-            # ------------------------------------------------
-            # EVIDENCE TABLE
-            # ------------------------------------------------
+            # Evidence
             evidence_rows = []
 
             for payer in suspicious_df["PAYER_NAME"]:
@@ -122,7 +127,7 @@ if uploaded_file:
             st.dataframe(evidence_df, use_container_width=True)
 
             st.download_button(
-                "Download Evidence CSV",
+                "Download Evidence",
                 evidence_df.to_csv(index=False),
                 "evidence.csv",
                 "text/csv"
