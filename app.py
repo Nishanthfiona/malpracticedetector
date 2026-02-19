@@ -296,8 +296,7 @@ with tab1:
     if dup_accounts.empty:
         st.success("🎉 No duplicate sender account IDs found!")
     else:
-        # Split groups into: needs review (has new txns) vs fully reviewed
-        needs_review = []
+        needs_review  = []
         fully_reviewed = []
 
         for acct_id, count in dup_accounts.items():
@@ -308,149 +307,138 @@ with tab1:
             else:
                 fully_reviewed.append((acct_id, count, group_df, status))
 
-        # ── NEW / UNREVIEWED groups ──
+        # ────────────────────────────────────────────────────────
+        # NEEDS REVIEW
+        # ────────────────────────────────────────────────────────
         st.markdown(f"### 🆕 Needs Review — {len(needs_review)} group(s)")
         if not needs_review:
-            st.success("✅ All groups have been reviewed!")
+            st.success("✅ All groups reviewed!")
         else:
-            st.caption("These groups contain at least one transaction not yet reviewed.")
             for acct_id, count, group_df, status in needs_review:
                 txn_types  = group_df["__txn_type"].unique().tolist()
                 new_count  = sum(1 for d in status["decisions"].values() if d == "⏳ Pending")
                 old_count  = count - new_count
+                prev_decs  = [d for d in status["decisions"].values() if d != "⏳ Pending"]
+                prev_legit = prev_decs and all(d == "✅ Legitimate" for d in prev_decs)
 
-                # Check if this sender had ALL previous txns marked Legitimate
-                # — that means user may assume it's fine, but needs to look at new ones carefully
-                prev_decisions = [d for k, d in status["decisions"].items() if d != "⏳ Pending"]
-                prev_all_legit = prev_decisions and all(d == "✅ Legitimate" for d in prev_decisions)
-
-                label = (f"🔑 {clean_id(acct_id)}  ({', '.join(txn_types)})  ·  "
-                         f"{count} transactions  "
-                         f"[🆕 {new_count} new"
-                         + (f"  ·  {old_count} previously reviewed" if old_count else "")
-                         + "]")
+                label = (f"🔑 {clean_id(acct_id)}  ({', '.join(txn_types)})  ·  {count} txns"
+                         + (f"  ·  🆕 {new_count} new" if new_count else "")
+                         + (f"  ·  {old_count} reviewed" if old_count else ""))
 
                 with st.expander(label, expanded=True):
-
-                    # ⚠️ Warning banner if sender was previously all-Legitimate
-                    if prev_all_legit and new_count > 0:
+                    if prev_legit and new_count > 0:
                         st.warning(
-                            f"⚠️ **Previously cleared sender** — this sender's earlier transactions "
-                            f"were all marked Legitimate, but **{new_count} new transaction(s) have appeared**. "
-                            f"Please review each new transaction carefully before deciding.",
-                            icon=None
-                        )
+                            f"⚠️ **Previously cleared sender** — {new_count} new transaction(s) appeared. "
+                            f"Review carefully before deciding.")
 
-                    # Show old (already reviewed) transactions first, greyed out
-                    old_rows = [(idx, row) for idx, row in group_df[display_cols + ["__txn_key", "__txn_type"]].iterrows()
-                                if get_txn_decision(row["__txn_key"]) != "⏳ Pending"]
-                    new_rows = [(idx, row) for idx, row in group_df[display_cols + ["__txn_key", "__txn_type"]].iterrows()
-                                if get_txn_decision(row["__txn_key"]) == "⏳ Pending"]
-
-                    if old_rows:
-                        st.markdown("<small style='color:#94a3b8;font-weight:600'>PREVIOUSLY REVIEWED</small>",
-                                    unsafe_allow_html=True)
-                    for _, row in old_rows:
-                        txn_key    = row["__txn_key"]
-                        cur_dec    = get_txn_decision(txn_key)
-                        widget_key = f"txn_{txn_key}"
-                        rc1, rc2   = st.columns([3, 1])
-                        with rc1:
-                            dec_icon = "✅" if "Legitimate" in cur_dec else "🚫"
-                            st.markdown(
-                                f"<small style='color:#94a3b8'>{dec_icon} <b>{txn_key}</b> · {str(row[desc_col])[:90]}</small>",
-                                unsafe_allow_html=True)
-                        with rc2:
-                            new_val = st.selectbox(
-                                "Decision", options=["⏳ Pending", "✅ Legitimate", "🚫 Flag as Duplicate"],
-                                index=["⏳ Pending", "✅ Legitimate", "🚫 Flag as Duplicate"].index(cur_dec),
-                                key=widget_key, label_visibility="collapsed")
-                            # Always sync — widget value is source of truth after first render
-                            set_txn_decision(txn_key, new_val, acct_id)
-
-                    if new_rows:
-                        st.markdown("<small style='color:#dc2626;font-weight:700'>🆕 NEW — REQUIRES YOUR REVIEW</small>",
-                                    unsafe_allow_html=True)
-
-                        # ── Group-level quick decision for NEW txns ──
-                        # User can decide all-at-once OR override individually per row below
-                        gc1, gc2 = st.columns([2, 2])
-                        with gc1:
-                            group_dec_key = f"grp_{acct_id}"
-                            group_choice  = st.selectbox(
-                                f"Apply same decision to all {len(new_rows)} new transaction(s):",
-                                options=["— pick to apply to all —", "✅ Legitimate", "🚫 Flag as Duplicate"],
-                                key=group_dec_key
-                            )
-                        with gc2:
-                            st.markdown("<br>", unsafe_allow_html=True)
-                            if st.button("Apply to all new", key=f"apply_{acct_id}",
-                                         disabled=(group_choice == "— pick to apply to all —")):
-                                for _, nrow in new_rows:
-                                    set_txn_decision(nrow["__txn_key"], group_choice, acct_id)
-                                st.rerun()
-
-                        st.caption("Or override individual transactions below:")
-
-                    for _, row in new_rows:
-                        txn_key    = row["__txn_key"]
-                        cur_dec    = get_txn_decision(txn_key)
-                        widget_key = f"txn_{txn_key}"
-                        # Colour row background based on status
-                        bg    = "#fef9c3"   # yellow tint for pending
-                        color = "#1e293b"   # dark text — readable on yellow
-                        rc1, rc2 = st.columns([3, 1])
-                        with rc1:
-                            st.markdown(
-                                f"<div style='background:{bg};padding:6px 10px;border-radius:6px;"
-                                f"color:{color};font-size:0.82rem;font-weight:600'>"
-                                f"🆕 <b>{txn_key}</b> &nbsp;·&nbsp; {str(row[desc_col])[:90]}</div>",
-                                unsafe_allow_html=True)
-                        with rc2:
-                            new_val = st.selectbox(
-                                "Decision", options=["⏳ Pending", "✅ Legitimate", "🚫 Flag as Duplicate"],
-                                index=["⏳ Pending", "✅ Legitimate", "🚫 Flag as Duplicate"].index(cur_dec),
-                                key=widget_key, label_visibility="collapsed")
-                            # Always sync — widget value is source of truth after first render
-                            set_txn_decision(txn_key, new_val, acct_id)
+                    # ── Table view: all transactions, clean Excel-like ──
+                    table_df = group_df[display_cols].copy()
+                    table_df.insert(0, "Status", [
+                        ("🆕 New" if get_txn_decision(r["__txn_key"]) == "⏳ Pending"
+                         else ("✅ Legitimate" if "Legitimate" in get_txn_decision(r["__txn_key"])
+                               else "🚫 Duplicate"))
+                        for _, r in group_df.iterrows()
+                    ])
+                    st.dataframe(table_df.reset_index(drop=True), use_container_width=True,
+                                 height=min(400, 45 + count * 36))
 
                     st.divider()
 
-        # ── FULLY REVIEWED groups ──
-        st.markdown(f"---")
-        st.markdown(f"### ✅ Already Reviewed — {len(fully_reviewed)} group(s)")
-        if fully_reviewed:
-            st.caption("All transactions in these groups have been reviewed. Expand to view or change.")
-            for acct_id, count, group_df, status in fully_reviewed:
-                txn_types = group_df["__txn_type"].unique().tolist()
-                consensus = status["consensus"]
-                icon      = "✅" if consensus == "✅ Legitimate" else ("🚫" if consensus and "Duplicate" in consensus else "🔀")
-                label     = f"{icon} {clean_id(acct_id)}  ({', '.join(txn_types)})  ·  {count} transactions  [{consensus}]"
+                    # ── Decision controls ──
+                    dc1, dc2, dc3 = st.columns([2, 1, 1])
+                    with dc1:
+                        group_key    = f"grp_sel_{acct_id}"
+                        group_choice = st.selectbox(
+                            "Apply to ALL transactions in this group:",
+                            options=["— choose —", "✅ Legitimate", "🚫 Flag as Duplicate"],
+                            key=group_key
+                        )
+                    with dc2:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        if st.button("✅ Apply to all", key=f"apply_{acct_id}",
+                                     disabled=(group_choice == "— choose —")):
+                            for _, r in group_df.iterrows():
+                                k = r["__txn_key"]
+                                # clear any stale widget key so index param takes effect
+                                wk = f"txn_{k}"
+                                if wk in st.session_state:
+                                    del st.session_state[wk]
+                                set_txn_decision(k, group_choice, acct_id)
+                            st.rerun()
+                    with dc3:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        if st.button("🆕 Apply to NEW only", key=f"applynew_{acct_id}",
+                                     disabled=(group_choice == "— choose —")):
+                            for _, r in group_df.iterrows():
+                                k = r["__txn_key"]
+                                if get_txn_decision(k) == "⏳ Pending":
+                                    wk = f"txn_{k}"
+                                    if wk in st.session_state:
+                                        del st.session_state[wk]
+                                    set_txn_decision(k, group_choice, acct_id)
+                            st.rerun()
 
-                with st.expander(label, expanded=False):
-                    for _, row in group_df[display_cols + ["__txn_key"]].iterrows():
-                        txn_key    = row["__txn_key"]
-                        cur_dec    = get_txn_decision(txn_key)
-                        widget_key = f"txn_{txn_key}"
-                        rc1, rc2   = st.columns([3, 1])
-                        with rc1:
-                            desc_short = str(row[desc_col])[:90]
-                            st.markdown(f"<small style='color:#555'><b>{txn_key}</b> · {desc_short}</small>",
-                                        unsafe_allow_html=True)
-                        with rc2:
-                            new_val = st.selectbox(
-                                "Decision",
-                                options=["⏳ Pending", "✅ Legitimate", "🚫 Flag as Duplicate"],
-                                index=["⏳ Pending", "✅ Legitimate", "🚫 Flag as Duplicate"].index(cur_dec),
-                                key=widget_key,
-                                label_visibility="collapsed"
-                            )
-                            # Always sync — widget value is source of truth after first render
-                            set_txn_decision(txn_key, new_val, acct_id)
+                    # ── Per-transaction override (for edge cases) ──
+                    with st.expander("Override individual transactions", expanded=False):
+                        for _, row in group_df.iterrows():
+                            txn_key    = row["__txn_key"]
+                            cur_dec    = get_txn_decision(txn_key)
+                            widget_key = f"txn_{txn_key}"
+                            rc1, rc2   = st.columns([3, 1])
+                            with rc1:
+                                st.caption(f"{txn_key} · {str(row[desc_col])[:80]}")
+                            with rc2:
+                                new_val = st.selectbox(
+                                    "Dec", options=["⏳ Pending", "✅ Legitimate", "🚫 Flag as Duplicate"],
+                                    index=["⏳ Pending", "✅ Legitimate", "🚫 Flag as Duplicate"].index(cur_dec),
+                                    key=widget_key, label_visibility="collapsed")
+                                if new_val != cur_dec:
+                                    if widget_key in st.session_state:
+                                        del st.session_state[widget_key]
+                                    set_txn_decision(txn_key, new_val, acct_id)
+                                    st.rerun()
 
-        # Progress summary
+        # ────────────────────────────────────────────────────────
+        # FULLY REVIEWED
+        # ────────────────────────────────────────────────────────
         st.markdown("---")
-        all_dup_txns = df_identified[df_identified["__is_dup"]]
+        st.markdown(f"### ✅ Already Reviewed — {len(fully_reviewed)} group(s)")
+        for acct_id, count, group_df, status in fully_reviewed:
+            txn_types = group_df["__txn_type"].unique().tolist()
+            consensus = status["consensus"]
+            icon  = "✅" if consensus == "✅ Legitimate" else ("🚫" if consensus and "Duplicate" in consensus else "🔀")
+            label = f"{icon} {clean_id(acct_id)}  ({', '.join(txn_types)})  ·  {count} txns  [{consensus}]"
+            with st.expander(label, expanded=False):
+                table_df = group_df[display_cols].copy()
+                table_df.insert(0, "Decision", [
+                    ("✅ Legitimate" if "Legitimate" in get_txn_decision(r["__txn_key"])
+                     else "🚫 Duplicate")
+                    for _, r in group_df.iterrows()
+                ])
+                st.dataframe(table_df.reset_index(drop=True), use_container_width=True,
+                             height=min(400, 45 + count * 36))
+                # Allow re-opening for correction via group selector
+                rc1, rc2, rc3 = st.columns([2, 1, 1])
+                with rc1:
+                    rk = f"re_{acct_id}"
+                    rechoice = st.selectbox("Change all decisions to:",
+                                            ["— no change —", "✅ Legitimate", "🚫 Flag as Duplicate",
+                                             "⏳ Reset to Pending"], key=rk)
+                with rc2:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    if st.button("Apply", key=f"reapply_{acct_id}",
+                                 disabled=(rechoice == "— no change —")):
+                        for _, r in group_df.iterrows():
+                            k  = r["__txn_key"]
+                            wk = f"txn_{k}"
+                            if wk in st.session_state:
+                                del st.session_state[wk]
+                            set_txn_decision(k, rechoice, acct_id)
+                        st.rerun()
+
+        # Progress bar
+        st.markdown("---")
+        all_dup_txns   = df_identified[df_identified["__is_dup"]]
         total_dup_txns = len(all_dup_txns)
         reviewed_count = sum(1 for _, row in all_dup_txns.iterrows()
                              if get_txn_decision(row["__txn_key"]) != "⏳ Pending")
