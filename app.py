@@ -241,8 +241,14 @@ def get_group_status(group_df) -> dict:
     """
     decisions = {}
     for _, row in group_df.iterrows():
-        key = row["__txn_key"]
-        decisions[key] = get_txn_decision(key)
+        key        = row["__txn_key"]
+        widget_key = f"txn_{key}"
+        # Prefer the live widget value (set by user interaction this session)
+        # over txn_decisions, which may lag by one rerun cycle
+        if widget_key in st.session_state:
+            decisions[key] = st.session_state[widget_key]
+        else:
+            decisions[key] = get_txn_decision(key)
     
     values = list(decisions.values())
     all_reviewed = all(v != "⏳ Pending" for v in values)
@@ -359,8 +365,8 @@ with tab1:
                                 "Decision", options=["⏳ Pending", "✅ Legitimate", "🚫 Flag as Duplicate"],
                                 index=["⏳ Pending", "✅ Legitimate", "🚫 Flag as Duplicate"].index(cur_dec),
                                 key=widget_key, label_visibility="collapsed")
-                            if new_val != cur_dec:
-                                set_txn_decision(txn_key, new_val, acct_id)
+                            # Always sync — widget value is source of truth after first render
+                            set_txn_decision(txn_key, new_val, acct_id)
 
                     if new_rows:
                         st.markdown("<small style='color:#dc2626;font-weight:700'>🆕 NEW — REQUIRES YOUR REVIEW</small>",
@@ -405,8 +411,8 @@ with tab1:
                                 "Decision", options=["⏳ Pending", "✅ Legitimate", "🚫 Flag as Duplicate"],
                                 index=["⏳ Pending", "✅ Legitimate", "🚫 Flag as Duplicate"].index(cur_dec),
                                 key=widget_key, label_visibility="collapsed")
-                            if new_val != cur_dec:
-                                set_txn_decision(txn_key, new_val, acct_id)
+                            # Always sync — widget value is source of truth after first render
+                            set_txn_decision(txn_key, new_val, acct_id)
 
                     st.divider()
 
@@ -439,8 +445,8 @@ with tab1:
                                 key=widget_key,
                                 label_visibility="collapsed"
                             )
-                            if new_val != cur_dec:
-                                set_txn_decision(txn_key, new_val, acct_id)
+                            # Always sync — widget value is source of truth after first render
+                            set_txn_decision(txn_key, new_val, acct_id)
 
         # Progress summary
         st.markdown("---")
