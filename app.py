@@ -6,289 +6,275 @@ from datetime import datetime
 
 st.set_page_config(page_title="Duplicate Transaction Detector", layout="wide", page_icon="🔍")
 
-# --- CSS Styling ---
 st.markdown("""
 <style>
-    .main-header { font-size: 2rem; font-weight: 700; color: #1e3a5f; margin-bottom: 0.2rem; }
-    .sub-header { color: #555; font-size: 1rem; margin-bottom: 1.5rem; }
-    .stat-box { background: #f0f4ff; border-left: 5px solid #3b82f6; padding: 1rem; border-radius: 8px; }
-    .dup-box { background: #fff5f5; border-left: 5px solid #ef4444; padding: 1rem; border-radius: 8px; }
-    .ok-box { background: #f0fff4; border-left: 5px solid #22c55e; padding: 1rem; border-radius: 8px; }
+.main-header { font-size: 2rem; font-weight: 700; color: #1e3a5f; }
+.sub-header { color: #666; font-size: 1rem; margin-bottom: 1rem; }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="main-header">🔍 Duplicate Transaction Detector</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Upload your bank statement Excel file to identify duplicate senders and flag suspicious transactions.</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Upload your bank statement to find senders who paid multiple times.</div>', unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────
-# HELPER: Extract sender ID from description
+# SENDER EXTRACTION
 # ──────────────────────────────────────────────
-def extract_sender_id(description: str) -> str:
+# These are generic words that appear in descriptions but are NOT real sender IDs
+SKIP_WORDS = re.compile(
+    r'^(UPI|IMPS|MMT|NEFT|RTGS|INFT|NACH|ECS|ATM|CHQ|CLG|INT|REVERSAL|'
+    r'PAYMENT FROM PH|PAYMENT FR|GOOGLE ADS|BPAY|CHARGES|FEE|TAX|GST|'
+    r'HDFC|SBI|ICICI|AXIS|KOTAK|PNB|BOB|CANARA|FEDERAL|IDFC|YES BANK|'
+    r'STATE BANK|BANK OF BARODA|UNION BANK|INDIAN BANK|PUNJAB NATIONAL|'
+    r'HDFC BANK|AXIS BANK|FEDERAL BANK|KOTAK BANK|PAYTM|PHONEPE|GPAY|'
+    r'AMAZON|FLIPKART|SWIGGY|ZOMATO|RAZORPAY|CASHFREE|\d+)$',
+    re.IGNORECASE
+)
+
+def extract_sender_id(description: str) -> str | None:
     """
-    Extract a normalised sender identifier from the description string.
-    Handles UPI, IMPS/MMT, NEFT, RTGS, and generic formats.
+    Extract a unique sender identifier from a transaction description.
+    Returns None for system/bank/generic transactions (not real person senders).
     """
-    if not isinstance(description, str):
-        return "UNKNOWN"
+    if not isinstance(description, str) or not description.strip():
+        return None
 
     desc = description.strip()
 
-    # UPI: look for VPA (xxx@yyy) or a name segment
-    upi_vpa = re.search(r'[\w.\-]+@[\w]+', desc)
-    if upi_vpa:
-        return upi_vpa.group(0).lower()
+    # 1. UPI VPA — most reliable: e.g. sruthycs200-2@okhdfcbank, 9912977860-2@ybl
+    vpa = re.search(r'([\w.\-]+@[\w]+)', desc)
+    if vpa:
+        return vpa.group(1).lower()
 
-    # IMPS / MMT: sender name usually after last '/'
-    if re.search(r'(IMPS|MMT)', desc, re.IGNORECASE):
-        parts = desc.split('/')
-        # Try to find a name-like part (non-numeric, >3 chars)
-        for part in reversed(parts):
-            part = part.strip()
-            if part and not part.isdigit() and len(part) > 3:
+    # 2. UPI without VPA — parse name from "UPI/REF/NAME/..."
+    if re.match(r'UPI/', desc, re.IGNORECASE):
+        parts = [p.strip() for p in desc.split('/')]
+        for part in parts[1:]:
+            if part and not SKIP_WORDS.match(part) and not part.isdigit() and len(part) > 3:
                 return part.upper()
+        return None  # Could not find real sender in UPI
 
-    # NEFT / RTGS: typically "NEFT/reference/SENDER NAME/..."
-    if re.search(r'(NEFT|RTGS)', desc, re.IGNORECASE):
-        parts = desc.split('/')
-        for part in reversed(parts):
-            part = part.strip()
-            if part and not part.isdigit() and len(part) > 3:
-                return part.upper()
+    # 3. IMPS / MMT — "MMT/IMPS/refno/desc/SENDER NAME/BANK"
+    if re.search(r'\b(IMPS|MMT)\b', desc, re.IGNORECASE):
+        parts = [p.strip() for p in desc.split('/')]
+        candidates = [p for p in parts
+                      if p and not p.isdigit()
+                      and not SKIP_WORDS.match(p)
+                      and len(p) > 3]
+        if candidates:
+            return candidates[-1].upper()
+        return None
 
-    # Cheque: use ChequeNo if available (handled outside)
-    # Fallback: first meaningful token
-    tokens = re.split(r'[/|\\,]', desc)
-    for tok in tokens:
-        tok = tok.strip()
-        if tok and len(tok) > 3 and not tok.isdigit():
-            return tok.upper()
+    # 4. NEFT / RTGS / INFT — try to get sender name
+    if re.search(r'\b(NEFT|RTGS|INFT)\b', desc, re.IGNORECASE):
+        parts = [p.strip() for p in re.split(r'[/\-|]', desc)]
+        candidates = [p for p in parts
+                      if p and not p.isdigit()
+                      and not SKIP_WORDS.match(p)
+                      and len(p) > 4]
+        if candidates:
+            return candidates[-1].upper()
+        return None  # INFT alone is not a useful sender
 
-    return desc[:30].upper()
+    # 5. Everything else (ATM, charges, etc.) — skip
+    return None
 
 
 # ──────────────────────────────────────────────
 # FILE UPLOAD
 # ──────────────────────────────────────────────
-uploaded_file = st.file_uploader("📂 Upload Excel / CSV file", type=["xlsx", "xls", "csv"])
+uploaded_file = st.file_uploader("📂 Upload Excel or CSV file", type=["xlsx", "xls", "csv"])
 
-if uploaded_file:
-    try:
-        if uploaded_file.name.endswith(".csv"):
-            df = pd.read_csv(uploaded_file)
-        else:
-            df = pd.read_excel(uploaded_file)
-    except Exception as e:
-        st.error(f"Could not read file: {e}")
-        st.stop()
-
-    st.success(f"✅ Loaded **{len(df):,}** rows from `{uploaded_file.name}`")
-
-    # ── Column mapping UI ──
-    with st.expander("⚙️ Map your columns (auto-detected)", expanded=False):
-        cols = ["(none)"] + list(df.columns)
-        c1, c2, c3 = st.columns(3)
-        # Auto-detect common column names
-        def best_guess(candidates):
-            for c in candidates:
-                for col in df.columns:
-                    if c.lower() in col.lower():
-                        return col
-            return cols[1]
-
-        desc_col = c1.selectbox("Description column", options=list(df.columns),
-                                index=list(df.columns).index(best_guess(["description","desc","narration","particulars"])))
-        date_col = c2.selectbox("Date column (optional)", options=cols,
-                                index=0)
-        txn_col  = c3.selectbox("Transaction ID column (optional)", options=cols,
-                                index=0)
-
-    # ── Build sender IDs ──
-    df["_sender_id"] = df[desc_col].apply(extract_sender_id)
-
-    # ── Find duplicates ──
-    dup_counts = df["_sender_id"].value_counts()
-    dup_senders = dup_counts[dup_counts > 1].index.tolist()
-
-    df["_is_duplicate_sender"] = df["_sender_id"].isin(dup_senders)
-    df["_review_status"] = "Pending"
-
-    # ──────────────────────────────────────────────
-    # SUMMARY STATS
-    # ──────────────────────────────────────────────
-    st.markdown("---")
-    s1, s2, s3, s4 = st.columns(4)
-    s1.metric("Total Transactions", f"{len(df):,}")
-    s2.metric("Unique Senders", f"{df['_sender_id'].nunique():,}")
-    s3.metric("Duplicate Senders", f"{len(dup_senders):,}")
-    s4.metric("Flagged Transactions", f"{df['_is_duplicate_sender'].sum():,}")
-
-    st.markdown("---")
-
-    # ──────────────────────────────────────────────
-    # SESSION STATE for review decisions
-    # ──────────────────────────────────────────────
-    if "review_map" not in st.session_state:
-        st.session_state.review_map = {}  # index -> "Legitimate" | "Duplicate"
-
-    # ──────────────────────────────────────────────
-    # TAB LAYOUT
-    # ──────────────────────────────────────────────
-    tab1, tab2, tab3 = st.tabs(["🚨 Duplicates for Review", "📋 All Transactions", "📥 Export"])
-
-    # ── TAB 1: Duplicates ──
-    with tab1:
-        if not dup_senders:
-            st.success("🎉 No duplicate senders found!")
-        else:
-            st.markdown(f"### Found **{len(dup_senders)}** sender(s) who paid more than once")
-
-            for sender in dup_senders:
-                sender_rows = df[df["_sender_id"] == sender].copy()
-                count = len(sender_rows)
-
-                with st.expander(f"👤 **{sender}** — {count} transactions", expanded=True):
-                    # Show the transactions table
-                    display_cols = [c for c in df.columns if not c.startswith("_")]
-                    st.dataframe(sender_rows[display_cols].reset_index(drop=True), use_container_width=True)
-
-                    st.markdown("**Mark each transaction:**")
-                    for idx in sender_rows.index:
-                        row = df.loc[idx]
-                        label = f"Txn #{idx+1} | {str(row[desc_col])[:80]}"
-                        current = st.session_state.review_map.get(idx, "Pending")
-                        decision = st.radio(
-                            label,
-                            options=["Pending", "✅ Legitimate", "🚫 Duplicate"],
-                            index=["Pending", "✅ Legitimate", "🚫 Duplicate"].index(current),
-                            horizontal=True,
-                            key=f"review_{idx}"
-                        )
-                        st.session_state.review_map[idx] = decision
-
-            # Live review summary
-            st.markdown("---")
-            st.markdown("### 📊 Review Progress")
-            total_flagged = df["_is_duplicate_sender"].sum()
-            reviewed = sum(1 for v in st.session_state.review_map.values() if v != "Pending")
-            legit = sum(1 for v in st.session_state.review_map.values() if v == "✅ Legitimate")
-            dupes = sum(1 for v in st.session_state.review_map.values() if v == "🚫 Duplicate")
-
-            r1, r2, r3, r4 = st.columns(4)
-            r1.metric("Total Flagged", total_flagged)
-            r2.metric("Reviewed", reviewed)
-            r3.metric("Marked Legitimate", legit)
-            r4.metric("Marked Duplicate", dupes)
-
-    # ── TAB 2: All Transactions ──
-    with tab2:
-        st.markdown("### All Transactions")
-        filter_opt = st.radio("Filter", ["All", "Flagged only", "Clean only"], horizontal=True)
-
-        view_df = df.copy()
-        if filter_opt == "Flagged only":
-            view_df = view_df[view_df["_is_duplicate_sender"]]
-        elif filter_opt == "Clean only":
-            view_df = view_df[~view_df["_is_duplicate_sender"]]
-
-        # Add review status from session
-        view_df["_review_status"] = view_df.index.map(
-            lambda i: st.session_state.review_map.get(i, "Pending")
-        )
-
-        display_cols = [c for c in view_df.columns if not c.startswith("_")]
-        extra_cols = ["_sender_id", "_is_duplicate_sender", "_review_status"]
-
-        def highlight_dups(row):
-            if row["_is_duplicate_sender"]:
-                return ["background-color: #fff3cd"] * len(row)
-            return [""] * len(row)
-
-        show_df = view_df[display_cols + extra_cols].rename(columns={
-            "_sender_id": "Extracted Sender ID",
-            "_is_duplicate_sender": "Duplicate Flag",
-            "_review_status": "Review Status"
-        })
-
-        st.dataframe(
-            show_df.style.apply(highlight_dups, axis=1),
-            use_container_width=True,
-            height=500
-        )
-
-    # ── TAB 3: Export ──
-    with tab3:
-        st.markdown("### 📥 Export Options")
-
-        # Prepare export df
-        export_df = df.copy()
-        export_df["Extracted Sender ID"] = export_df["_sender_id"]
-        export_df["Duplicate Flag"] = export_df["_is_duplicate_sender"].map({True: "YES", False: "NO"})
-        export_df["Review Status"] = export_df.index.map(
-            lambda i: st.session_state.review_map.get(i, "Pending")
-        )
-        export_df = export_df[[c for c in export_df.columns if not c.startswith("_")] +
-                               ["Extracted Sender ID", "Duplicate Flag", "Review Status"]]
-
-        def to_excel(data: pd.DataFrame) -> bytes:
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                data.to_excel(writer, index=False, sheet_name="Transactions")
-                # Auto-size columns
-                ws = writer.sheets["Transactions"]
-                for col in ws.columns:
-                    max_len = max((len(str(cell.value)) for cell in col if cell.value), default=10)
-                    ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 50)
-            return buf.getvalue()
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.markdown("#### 🔴 Duplicates Only")
-            dup_only = export_df[export_df["Duplicate Flag"] == "YES"]
-            st.info(f"{len(dup_only)} flagged transactions")
-            st.download_button(
-                label="⬇️ Download Duplicates Excel",
-                data=to_excel(dup_only),
-                file_name=f"duplicates_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
-        with col2:
-            st.markdown("#### 📋 Full Report (All Transactions)")
-            st.info(f"{len(export_df)} total transactions with flags & review status")
-            st.download_button(
-                label="⬇️ Download Full Report Excel",
-                data=to_excel(export_df),
-                file_name=f"full_report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
-        # Marked duplicates export
-        st.markdown("---")
-        st.markdown("#### 🚫 Only Transactions Marked as 'Duplicate' by Reviewer")
-        marked_dup = export_df[export_df.index.map(
-            lambda i: st.session_state.review_map.get(i, "") == "🚫 Duplicate"
-        )]
-        if len(marked_dup) == 0:
-            st.warning("No transactions have been marked as Duplicate yet. Go to the Duplicates tab to review.")
-        else:
-            st.success(f"{len(marked_dup)} transactions marked as duplicate by reviewer")
-            st.download_button(
-                label="⬇️ Download Reviewer-Marked Duplicates",
-                data=to_excel(marked_dup),
-                file_name=f"marked_duplicates_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
-else:
-    st.info("👆 Upload an Excel or CSV file to get started.")
+if not uploaded_file:
+    st.info("Upload your bank statement Excel/CSV file to begin.")
     st.markdown("""
-    **How it works:**
-    1. Upload your bank statement (`.xlsx`, `.xls`, or `.csv`)
-    2. The app auto-detects sender IDs from UPI, IMPS, NEFT, RTGS descriptions
-    3. Flags any sender who appears more than once
-    4. You review each flagged transaction and mark it as **Legitimate** or **Duplicate**
-    5. Export results to Excel — duplicates only, full report, or reviewer-marked list
-
-    **Supported transaction formats:** UPI (`name@vpa`), IMPS/MMT, NEFT, RTGS, and more.
+    **What this tool does:**
+    - Extracts the **actual sender account/ID** from UPI, IMPS, NEFT, RTGS descriptions
+    - Groups transactions by the same sender to flag repeat payers
+    - Lets you mark each group as Legitimate or Duplicate
+    - Exports flagged transactions to Excel
     """)
+    st.stop()
+
+# Load file
+try:
+    if uploaded_file.name.endswith(".csv"):
+        df_raw = pd.read_csv(uploaded_file)
+    else:
+        df_raw = pd.read_excel(uploaded_file)
+except Exception as e:
+    st.error(f"Could not read file: {e}")
+    st.stop()
+
+st.success(f"✅ Loaded **{len(df_raw):,}** rows from `{uploaded_file.name}`")
+
+all_cols = list(df_raw.columns)
+
+def best_match(candidates):
+    for c in candidates:
+        for col in all_cols:
+            if c.lower() in col.lower():
+                return col
+    return all_cols[0]
+
+with st.expander("⚙️ Column Settings", expanded=False):
+    c1, c2, c3 = st.columns(3)
+    desc_col   = c1.selectbox("Description column", all_cols,
+                               index=all_cols.index(best_match(["description","desc","narration","particulars"])))
+    amount_col = c2.selectbox("Amount column (optional)", ["(none)"] + all_cols, index=0)
+    date_col   = c3.selectbox("Date column (optional)", ["(none)"] + all_cols, index=0)
+
+# ── Extract sender IDs ──
+df = df_raw.copy()
+df["__sender_id"] = df[desc_col].apply(extract_sender_id)
+
+df_with_sender = df[df["__sender_id"].notna()].copy()
+
+sender_counts = df_with_sender["__sender_id"].value_counts()
+dup_senders   = sender_counts[sender_counts > 1]
+
+df_with_sender["__is_dup"] = df_with_sender["__sender_id"].isin(dup_senders.index)
+
+# ──────────────────────────────────────────────
+# SUMMARY METRICS
+# ──────────────────────────────────────────────
+st.markdown("---")
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Total Transactions", f"{len(df):,}")
+m2.metric("Identifiable Senders", f"{df_with_sender['__sender_id'].nunique():,}")
+m3.metric("Repeat Senders", f"{len(dup_senders):,}")
+m4.metric("Flagged Transactions", f"{df_with_sender['__is_dup'].sum():,}")
+st.markdown("---")
+
+# Session state for group-level decisions
+if "group_decisions" not in st.session_state:
+    st.session_state.group_decisions = {}
+
+display_cols = list(df_raw.columns)
+
+# ──────────────────────────────────────────────
+# TABS
+# ──────────────────────────────────────────────
+tab1, tab2, tab3 = st.tabs(["🚨 Duplicate Senders", "📋 All Transactions", "📥 Export"])
+
+# ── TAB 1: Duplicate Senders ──
+with tab1:
+    if dup_senders.empty:
+        st.success("🎉 No repeat senders found!")
+    else:
+        st.markdown(f"**{len(dup_senders)}** sender(s) paid more than once. "
+                    "Expand each group to review and mark a decision.")
+
+        for sender, count in dup_senders.items():
+            group_df   = df_with_sender[df_with_sender["__sender_id"] == sender][display_cols]
+            current    = st.session_state.group_decisions.get(sender, "⏳ Pending")
+
+            label = f"👤 {sender}  —  {count} transactions  [{current}]"
+            with st.expander(label, expanded=False):
+                st.dataframe(group_df.reset_index(drop=True), use_container_width=True,
+                             height=min(250, 55 + count * 38))
+
+                new_dec = st.selectbox(
+                    "Decision for this sender:",
+                    options=["⏳ Pending", "✅ Legitimate", "🚫 Mark as Duplicate"],
+                    index=["⏳ Pending", "✅ Legitimate", "🚫 Mark as Duplicate"].index(current),
+                    key=f"dec_{sender}"
+                )
+                st.session_state.group_decisions[sender] = new_dec
+
+        st.markdown("---")
+        st.markdown("### 📊 Review Progress")
+        decisions = st.session_state.group_decisions
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Total Groups",  len(dup_senders))
+        p2.metric("Pending",       sum(1 for v in decisions.values() if v == "⏳ Pending"))
+        p3.metric("Legitimate",    sum(1 for v in decisions.values() if v == "✅ Legitimate"))
+        p4.metric("Marked Dup",    sum(1 for v in decisions.values() if v == "🚫 Mark as Duplicate"))
+
+# ── TAB 2: All Transactions ──
+with tab2:
+    filter_opt = st.radio("Show:", ["All", "Flagged (repeat senders)", "Clean only"], horizontal=True)
+
+    view = df_with_sender.copy()
+    view["Sender ID"]      = view["__sender_id"]
+    view["Repeat Sender"]  = view["__is_dup"].map({True: "🔴 YES", False: "🟢 NO"})
+    view["Group Decision"] = view["__sender_id"].map(
+        lambda s: st.session_state.group_decisions.get(s, "⏳ Pending")
+    )
+
+    if filter_opt == "Flagged (repeat senders)":
+        view = view[view["__is_dup"]]
+    elif filter_opt == "Clean only":
+        view = view[~view["__is_dup"]]
+
+    show_cols = display_cols + ["Sender ID", "Repeat Sender", "Group Decision"]
+    st.dataframe(view[show_cols].reset_index(drop=True), use_container_width=True, height=500)
+
+# ── TAB 3: Export ──
+with tab3:
+    st.markdown("### 📥 Download Options")
+
+    def to_excel_bytes(data: pd.DataFrame, sheet="Sheet1") -> bytes:
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            data.to_excel(writer, index=False, sheet_name=sheet)
+            ws = writer.sheets[sheet]
+            for col in ws.columns:
+                max_len = max((len(str(c.value or "")) for c in col), default=10)
+                ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 50)
+        return buf.getvalue()
+
+    export_base = df_with_sender.copy()
+    export_base["Sender ID"]      = export_base["__sender_id"]
+    export_base["Repeat Sender"]  = export_base["__is_dup"].map({True: "YES", False: "NO"})
+    export_base["Group Decision"] = export_base["__sender_id"].map(
+        lambda s: st.session_state.group_decisions.get(s, "Pending")
+    )
+    export_cols = display_cols + ["Sender ID", "Repeat Sender", "Group Decision"]
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.markdown("#### 🔴 Repeat Senders Only")
+        dup_export = export_base[export_base["__is_dup"]][export_cols]
+        st.info(f"{len(dup_export)} transactions")
+        st.download_button("⬇️ Download", data=to_excel_bytes(dup_export, "Duplicates"),
+                           file_name=f"duplicates_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           use_container_width=True)
+
+    with col2:
+        st.markdown("#### 🚫 Marked as Duplicate")
+        marked_senders = [s for s, d in st.session_state.group_decisions.items()
+                          if d == "🚫 Mark as Duplicate"]
+        marked_export = export_base[export_base["__sender_id"].isin(marked_senders)][export_cols]
+        st.info(f"{len(marked_export)} transactions")
+        if marked_export.empty:
+            st.warning("No groups marked yet. Go to Tab 1.")
+        else:
+            st.download_button("⬇️ Download", data=to_excel_bytes(marked_export, "MarkedDuplicates"),
+                               file_name=f"marked_dup_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               use_container_width=True)
+
+    with col3:
+        st.markdown("#### 📋 Full Report")
+        st.info(f"{len(export_base)} transactions")
+        st.download_button("⬇️ Download", data=to_excel_bytes(export_base[export_cols], "FullReport"),
+                           file_name=f"full_report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("#### 📊 Repeat Sender Summary Table")
+    if not dup_senders.empty:
+        summary = pd.DataFrame({
+            "Sender ID":         dup_senders.index,
+            "Transaction Count": dup_senders.values,
+            "Decision":          [st.session_state.group_decisions.get(s, "⏳ Pending")
+                                   for s in dup_senders.index]
+        }).sort_values("Transaction Count", ascending=False).reset_index(drop=True)
+        st.dataframe(summary, use_container_width=True)
+        st.download_button("⬇️ Download Summary",
+                           data=to_excel_bytes(summary, "Summary"),
+                           file_name=f"dup_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
