@@ -78,8 +78,34 @@ def extract_account_id(description: str) -> tuple[str | None, str]:
         return None, txn_type
 
     # ── IMPS / MMT ───────────────────────────────────────────
-    # Deliberately skipped: only bank name + truncated name available, no account number
+    # Structure: MMT/IMPS/REF/PURPOSE/SENDER_NAME/BANK
+    # Sender name is the second-to-last slash-segment (before the bank name).
+    # Names are truncated by the bank (e.g. "FAROOQUE B", "SEMBAIYAN") but
+    # consistent across transactions from the same sender — good enough to flag duplicates.
+    # Flagged results are shown for human review since names aren't guaranteed unique.
     if re.search(r'\b(IMPS|MMT)\b', desc, re.IGNORECASE):
+        known_banks = re.compile(
+            r'^(federal|hdfc|sbi|icici|axis|kotak|south indian|canara|pnb|bob|'
+            r'idfc|yes|union|indian|karnataka|karur|city union|tamilnad|dcb|rbl|'
+            r'indusind|bandhan|au small|ujjivan|equitas|jana|central|uco|'
+            r'syndicate|corporation|allahabad|dena|vijaya|oriental|'
+            r'state bank|bank of|standard chartered|citi|deutsche|hsbc|'
+            r'baroda|punjab|federal bank|south indian ba)',
+            re.IGNORECASE
+        )
+        parts = [p.strip() for p in desc.split('/')]
+        # Second-to-last part is sender name, last part is bank
+        if len(parts) >= 2:
+            candidate = parts[-2].strip()
+            bank_part = parts[-1].strip()
+            # Valid sender: not a bank name, not numeric, not a keyword, len > 2
+            skip_kw = re.compile(r'^(MMT|IMPS|NEFT|RTGS|UPI|\d+)$', re.IGNORECASE)
+            if (candidate
+                    and not skip_kw.match(candidate)
+                    and not known_banks.match(candidate)
+                    and not candidate.isdigit()
+                    and len(candidate) > 2):
+                return f"imps_name:{candidate.upper()}", "IMPS"
         return None, "IMPS"
 
     return None, "OTHER"
@@ -97,9 +123,9 @@ if not uploaded_file:
 
     | Transaction Type | How sender is identified | Duplicate detection |
     |---|---|---|
-    | **UPI** | VPA username before `@` (e.g. `sruthycs200-2`) | ✅ Yes |
-    | **NEFT / RTGS** | Sender account number before IFSC code | ✅ Yes |
-    | **IMPS / MMT** | Not possible — only bank name in description | ❌ Skipped |
+    | **UPI** | VPA username before `@` (e.g. `sruthycs200-2`) | ✅ Reliable |
+    | **NEFT / RTGS** | Sender account number before IFSC code | ✅ Reliable |
+    | **IMPS / MMT** | Sender name from description (e.g. `FAROOQUE B`) | ⚠️ For human review (names may be truncated) |
 
     Only **CR transactions** are analysed.
     """)
@@ -180,7 +206,7 @@ with st.expander("📊 Extraction breakdown by transaction type"):
     bd["Skipped (no ID)"] = bd["Total"] - bd["ID Extracted"]
     bd.columns            = ["Txn Type", "Total CR", "ID Extracted", "Skipped (no ID)"]
     st.dataframe(bd, use_container_width=True, hide_index=True)
-    st.caption("IMPS/MMT: skipped intentionally — descriptions don't contain account numbers, only bank names.")
+    st.caption("IMPS/MMT: sender name used as identifier (e.g. 'FAROOQUE B'). Flagged for human review since names may be truncated — not as reliable as a UPI VPA or NEFT account number.")
 
 # Session state
 if "group_decisions" not in st.session_state:
@@ -191,7 +217,7 @@ display_cols = list(df_raw.columns)
 # ══════════════════════════════════════════════════════════════
 # TABS
 # ══════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4 = st.tabs(["🚨 Duplicate Accounts", "📋 All CR Transactions", "❓ Unidentified (IMPS etc.)", "📥 Export"])
+tab1, tab2, tab3, tab4 = st.tabs(["🚨 Duplicate Accounts", "📋 All CR Transactions", "❓ Unidentified Rows", "📥 Export"])
 
 # ── TAB 1: Duplicates ─────────────────────────────────────────
 with tab1:
@@ -206,8 +232,8 @@ with tab1:
             txn_types = group_df["__txn_type"].unique().tolist()
             current   = st.session_state.group_decisions.get(acct_id, "⏳ Pending")
 
-            # Display label: strip the "upi:" / "acct:" prefix for readability
-            display_id = acct_id.replace("upi:", "").replace("acct:", "")
+            # Display label: strip internal prefixes for readability
+            display_id = acct_id.replace("upi:", "").replace("acct:", "").replace("imps_name:", "⚠️ ")
             label = f"🔑 {display_id}  ({', '.join(txn_types)})  ·  {count} transactions  [{current}]"
 
             with st.expander(label, expanded=False):
@@ -261,11 +287,10 @@ with tab2:
 
 # ── TAB 3: Unidentified ───────────────────────────────────────
 with tab3:
-    st.markdown(f"### {len(df_unidentified):,} CR transactions — no account ID extractable")
+    st.markdown(f"### {len(df_unidentified):,} CR transactions — no identifier extractable")
     st.caption(
-        "Mostly IMPS/MMT. These descriptions only contain bank names and truncated sender names, "
-        "not unique account numbers. Duplicate detection is not possible for these rows without "
-        "additional data from your core banking system."
+        "Transactions where no sender name, VPA, or account number could be found "
+        "(e.g. ATM, bank charges, reversals, or unusual formats)."
     )
     if not df_unidentified.empty:
         show = df_unidentified[display_cols + ["__txn_type"]].rename(columns={"__txn_type": "Txn Type"})
@@ -287,7 +312,7 @@ with tab4:
 
     # Build enriched export frame
     export = df_cr.copy()
-    export["Account ID"]  = export["__account_id"].fillna("").str.replace("upi:", "").str.replace("acct:", "")
+    export["Account ID"]  = export["__account_id"].fillna("").str.replace("upi:", "").str.replace("acct:", "").str.replace("imps_name:", "[IMPS] ")
     export["Txn Type"]    = export["__txn_type"]
     export["Repeat Flag"] = export["__account_id"].apply(
         lambda s: "REPEAT" if s in dup_accounts.index else ("UNIQUE" if pd.notna(s) and s != "" else "NO_ID")
@@ -337,8 +362,8 @@ with tab4:
         for acct_id, cnt in dup_accounts.items():
             types = df_identified[df_identified["__account_id"] == acct_id]["__txn_type"].unique().tolist()
             rows.append({
-                "Account ID":        acct_id.replace("upi:", "").replace("acct:", ""),
-                "Type":              "upi" if acct_id.startswith("upi:") else "acct",
+                "Account ID":        acct_id.replace("upi:", "").replace("acct:", "").replace("imps_name:", ""),
+                "ID Type":           "UPI VPA" if acct_id.startswith("upi:") else ("NEFT/RTGS Acct#" if acct_id.startswith("acct:") else "IMPS Name ⚠️"),
                 "Txn Type":          ", ".join(types),
                 "Count":             cnt,
                 "Decision":          st.session_state.group_decisions.get(acct_id, "⏳ Pending"),
