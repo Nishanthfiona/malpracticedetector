@@ -32,6 +32,29 @@ with _hc2:
     """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════
+# PASSWORD GATE
+# ══════════════════════════════════════════════════════════════
+# Password is stored in Streamlit Cloud secrets, NOT in this code.
+# In Streamlit Cloud dashboard → App settings → Secrets → add:
+#   PASSWORD = "your_password_here"
+_pw_col1, _pw_col2, _pw_col3 = st.columns([1, 1, 1])
+with _pw_col2:
+    _entered = st.text_input("🔒 Enter password to access TxnGuard", type="password",
+                              placeholder="Password")
+    if not _entered:
+        st.info("Enter your password to continue.")
+        st.stop()
+    try:
+        _correct = st.secrets["PASSWORD"]
+    except Exception:
+        st.error("⚠️ App not configured: PASSWORD secret missing. "
+                 "Add it in Streamlit Cloud → App settings → Secrets.")
+        st.stop()
+    if _entered != _correct:
+        st.error("❌ Incorrect password.")
+        st.stop()
+
+# ══════════════════════════════════════════════════════════════
 # ACCOUNT ID EXTRACTION (unchanged logic)
 # ══════════════════════════════════════════════════════════════
 def extract_account_id(description: str) -> tuple:
@@ -342,14 +365,40 @@ with tab1:
                     if new_rows:
                         st.markdown("<small style='color:#dc2626;font-weight:700'>🆕 NEW — REQUIRES YOUR REVIEW</small>",
                                     unsafe_allow_html=True)
+
+                        # ── Group-level quick decision for NEW txns ──
+                        # User can decide all-at-once OR override individually per row below
+                        gc1, gc2 = st.columns([2, 2])
+                        with gc1:
+                            group_dec_key = f"grp_{acct_id}"
+                            group_choice  = st.selectbox(
+                                f"Apply same decision to all {len(new_rows)} new transaction(s):",
+                                options=["— pick to apply to all —", "✅ Legitimate", "🚫 Flag as Duplicate"],
+                                key=group_dec_key
+                            )
+                        with gc2:
+                            st.markdown("<br>", unsafe_allow_html=True)
+                            if st.button("Apply to all new", key=f"apply_{acct_id}",
+                                         disabled=(group_choice == "— pick to apply to all —")):
+                                for _, nrow in new_rows:
+                                    set_txn_decision(nrow["__txn_key"], group_choice, acct_id)
+                                st.rerun()
+
+                        st.caption("Or override individual transactions below:")
+
                     for _, row in new_rows:
                         txn_key    = row["__txn_key"]
                         cur_dec    = get_txn_decision(txn_key)
                         widget_key = f"txn_{txn_key}"
-                        rc1, rc2   = st.columns([3, 1])
+                        # Colour row background based on status
+                        bg    = "#fef9c3"   # yellow tint for pending
+                        color = "#1e293b"   # dark text — readable on yellow
+                        rc1, rc2 = st.columns([3, 1])
                         with rc1:
                             st.markdown(
-                                f"<small style='color:#1e293b;font-weight:600'>🆕 <b>{txn_key}</b> · {str(row[desc_col])[:90]}</small>",
+                                f"<div style='background:{bg};padding:6px 10px;border-radius:6px;"
+                                f"color:{color};font-size:0.82rem;font-weight:600'>"
+                                f"🆕 <b>{txn_key}</b> &nbsp;·&nbsp; {str(row[desc_col])[:90]}</div>",
                                 unsafe_allow_html=True)
                         with rc2:
                             new_val = st.selectbox(
@@ -360,8 +409,6 @@ with tab1:
                                 set_txn_decision(txn_key, new_val, acct_id)
 
                     st.divider()
-                    # No bulk quick-action buttons intentionally —
-                    # every new transaction must be reviewed individually.
 
         # ── FULLY REVIEWED groups ──
         st.markdown(f"---")
