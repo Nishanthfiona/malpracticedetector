@@ -4,17 +4,27 @@ import re
 import io
 from datetime import datetime
 
-st.set_page_config(page_title="Duplicate Transaction Detector", layout="wide", page_icon="🔍")
+st.set_page_config(page_title="TxnGuard – Duplicate Payment Detector", layout="wide", page_icon="🛡️")
 
 st.markdown("""
 <style>
-.main-header { font-size: 2rem; font-weight: 700; color: #1e3a5f; }
-.sub-header  { color: #666; font-size: 1rem; margin-bottom: 1rem; }
+.main-header { font-size: 2.2rem; font-weight: 800; color: #1e3a5f; letter-spacing: -0.5px; }
+.sub-header  { color: #555; font-size: 1rem; margin-bottom: 0.4rem; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-header">🔍 Duplicate Transaction Detector</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Detects CR transactions where the same sender account ID appears more than once.</div>', unsafe_allow_html=True)
+_hc1, _hc2 = st.columns([3, 1])
+with _hc1:
+    st.markdown('<div class="main-header">🛡️ TxnGuard</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Duplicate Payment Detector — flags CR transactions where the same sender appears more than once across UPI, NEFT, RTGS & IMPS.</div>', unsafe_allow_html=True)
+with _hc2:
+    st.markdown("""
+    <div style="text-align:right;padding-top:0.5rem;">
+        <div style="font-size:0.72rem;color:#999;">Built by</div>
+        <div style="font-weight:800;color:#1e3a5f;font-size:1.05rem;">Nishanth Fiona</div>
+        <div style="font-size:0.8rem;color:#2563eb;font-weight:600;">Data Analyst</div>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════
 # ACCOUNT ID EXTRACTION
@@ -230,9 +240,13 @@ with tab1:
         for acct_id, count in dup_accounts.items():
             group_df  = df_identified[df_identified["__account_id"] == acct_id]
             txn_types = group_df["__txn_type"].unique().tolist()
-            current   = st.session_state.group_decisions.get(acct_id, "⏳ Pending")
+            widget_key = f"dec_{acct_id}"
 
-            # Display label: strip internal prefixes for readability
+            # Read from the widget key directly so the label updates immediately
+            # without waiting for the next full rerun cycle
+            current = st.session_state.get(widget_key,
+                      st.session_state.group_decisions.get(acct_id, "⏳ Pending"))
+
             display_id = acct_id.replace("upi:", "").replace("acct:", "").replace("imps_name:", "⚠️ ")
             label = f"🔑 {display_id}  ({', '.join(txn_types)})  ·  {count} transactions  [{current}]"
 
@@ -246,8 +260,9 @@ with tab1:
                     "Decision for this account:",
                     options=["⏳ Pending", "✅ Legitimate", "🚫 Flag as Duplicate"],
                     index=["⏳ Pending", "✅ Legitimate", "🚫 Flag as Duplicate"].index(current),
-                    key=f"dec_{acct_id}"
+                    key=widget_key
                 )
+                # Sync back to group_decisions so other parts of the app can read it
                 st.session_state.group_decisions[acct_id] = new_dec
 
         st.markdown("---")
